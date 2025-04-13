@@ -17,14 +17,17 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from rich.console import Console
 from rich.text import Text
+from pathlib import Path
+from configset import configset
 
+CONFIG = configset(str(Path(__file__).parent / Path(__file__).stem) + ".ini")
 console = Console()
 
 # === CONFIGURATION ===
-LOG_DIR = os.path.join(os.environ["APPDATA"], "Code", "logs")  # Windows path
-SYSLOG_SERVER = "127.0.0.1"
-SYSLOG_PORT = 514
-HOSTNAME = "127.0.0.1"
+LOG_DIR = CONFIG.get_config('path', 'log_dir') or os.path.join(os.environ["APPDATA"], "Code", "logs")  # Windows path
+SYSLOG_SERVER = CONFIG.get_config('syslog', 'host') or "127.0.0.1"
+SYSLOG_PORT = CONFIG.get_config('syslog', 'port') or 514
+HOSTNAME = CONFIG.get_config('host', 'name') or socket.gethostname() or "127.0.0.1"
 
 # === STYLE CONFIG ===
 LEVEL_STYLES = {
