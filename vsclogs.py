@@ -12,6 +12,7 @@ import socket
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 import time
 import threading
+import stat
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from rich.console import Console
@@ -51,17 +52,14 @@ SYSLOG_PRI = {
 
 FACILITY = 1  # user-level messages
 
-# Track files already tailed
+# Track tailed files by inode
 tailed_files = {}
 
 def parse_level(line: str) -> str:
     line_lower = line.lower()
-
-    # Priority from VSCode tag first
     tag_match = re.search(r"\[(debug|info|notice|warning|error|critical|alert|emergency)\]", line_lower)
     tag_level = tag_match.group(1) if tag_match else None
 
-    # Content-based level detection (more specific wins)
     if "emergency" in line_lower:
         return "emergency"
     if "alert" in line_lower:
@@ -76,29 +74,18 @@ def parse_level(line: str) -> str:
         return tag_level
     return "notice"
 
-# def send_syslog(line):
-#     level = parse_level(line)
-#     pri = FACILITY * 8 + SYSLOG_PRI.get(level, 5)
-#     timestamp = time.strftime("%b %d %H:%M:%S")
-#     msg = f"<{pri}>{timestamp} {HOSTNAME} VSCodeLog: {line.strip()}"
-#     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-#     sock.sendto(msg.encode(), (SYSLOG_SERVER, SYSLOG_PORT))
-#     print_to_console(level, line)
-
 def send_syslog(line):
-    debug(line = line)
+    debug(line=line)
     stripped = line.strip()
 
-    # Detect traceback or indented code lines
     is_traceback = (
         stripped.startswith("Traceback")
         or stripped.startswith("File ")
-        or line.startswith(" ")  # leading space → code block or traceback
-        or re.match(r'^\s*at\s+', line, re.IGNORECASE)  # Java/Node-style
+        or line.startswith(" ")
+        or re.match(r'^\s*at\s+', line, re.IGNORECASE)
     )
 
     if is_traceback or not stripped:
-        # Print raw without parsing or syslog (or you can still send it raw)
         console.print(line.rstrip())
         return
 
@@ -106,7 +93,7 @@ def send_syslog(line):
     pri = FACILITY * 8 + SYSLOG_PRI.get(level, 5)
     timestamp = time.strftime("%b %d %H:%M:%S")
     msg = f"<{pri}>{timestamp} {HOSTNAME} VSCodeLog: {line.strip()}"
-    debug(msg = msg)
+    debug(msg=msg)
     sock.sendto(msg.encode(), (SYSLOG_SERVER, SYSLOG_PORT))
     print_to_console(level, line)
 
@@ -116,10 +103,17 @@ def print_to_console(level, line):
     console.print(text)
 
 def tail_file(file_path):
-    if file_path in tailed_files:
+    try:
+        inode = os.stat(file_path).st_ino
+        if inode in tailed_files:
+            return
+        tailed_files[inode] = True
+    except Exception as e:
+        console.print(f"[!] stat() failed on {file_path}: {e}", style="bold red")
         return
-    tailed_files[file_path] = True
+
     print(f"[*] Tailing: {file_path}")
+
     def _tail():
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -131,17 +125,61 @@ def tail_file(file_path):
                     else:
                         time.sleep(0.2)
         except Exception as e:
-            sock.sendto(e.encode(), (SYSLOG_SERVER, SYSLOG_PORT))
             console.print(f"[!] Error reading {file_path}: {e}", style="bold red")
+            sock.sendto(str(e).encode(), (SYSLOG_SERVER, SYSLOG_PORT))
+
     threading.Thread(target=_tail, daemon=True).start()
+
+# class LogHandler(FileSystemEventHandler):
+#     def on_created(self, event):
+#         if not event.is_directory and event.src_path.endswith(".log"):
+#             tail_file(event.src_path)
+
+#     # You can remove or comment this if you want to fully avoid re-tailing on modify
+#     # def on_modified(self, event):
+#     #     if not event.is_directory and event.src_path.endswith(".log"):
+#     #         tail_file(event.src_path)
 
 class LogHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".log"):
             tail_file(event.src_path)
+
     def on_modified(self, event):
+        # If the file isn't already being tailed, start tailing it
         if not event.is_directory and event.src_path.endswith(".log"):
-            tail_file(event.src_path)
+            if event.src_path not in tailed_files:
+                tail_file(event.src_path)
+    
+    def on_deleted(self, event):
+        # If the file is deleted, remove it from the tailed_files dictionary
+        if not event.is_directory and event.src_path.endswith(".log"):
+            try:
+                inode = os.stat(event.src_path).st_ino
+                if inode in tailed_files:
+                    del tailed_files[inode]
+            except Exception as e:
+                console.print(f"[!] stat() failed on {event.src_path}: {e}", style="bold red")
+    
+    def on_moved(self, event):
+        # If the file is moved, remove it from the tailed_files dictionary
+        if not event.is_directory and event.dest_path.endswith(".log"):
+            try:
+                inode = os.stat(event.dest_path).st_ino
+                if inode in tailed_files:
+                    del tailed_files[inode]
+            except Exception as e:
+                console.print(f"[!] stat() failed on {event.dest_path}: {e}", style="bold red")
+    
+    # def on_any_event(self, event):
+    #     # If the file is created, modified, or deleted, remove it from the tailed_files dictionary
+    #     if not event.is_directory and event.src_path.endswith(".log"):
+    #         try:
+    #             inode = os.stat(event.src_path).st_ino
+    #             if inode in tailed_files:
+    #                 del tailed_files[inode]
+    #         except Exception as e:
+    #             console.print(f"[!] stat() failed on {event.src_path}: {e}", style="bold red")
 
 def scan_existing_logs():
     for root, _, files in os.walk(LOG_DIR):
