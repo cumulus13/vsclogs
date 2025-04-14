@@ -28,6 +28,7 @@ LOG_DIR = CONFIG.get_config('path', 'log_dir') or os.path.join(os.environ["APPDA
 SYSLOG_SERVER = CONFIG.get_config('syslog', 'host') or "127.0.0.1"
 SYSLOG_PORT = CONFIG.get_config('syslog', 'port') or 514
 HOSTNAME = CONFIG.get_config('host', 'name') or socket.gethostname() or "127.0.0.1"
+TO_REMOTE_SYSLOG = CONFIG.get_config('syslog', 'active')
 
 # === STYLE CONFIG ===
 LEVEL_STYLES = {
@@ -93,11 +94,12 @@ def send_syslog(line):
         return
 
     level = parse_level(line)
-    pri = FACILITY * 8 + SYSLOG_PRI.get(level, 5)
-    timestamp = time.strftime("%b %d %H:%M:%S")
-    msg = f"<{pri}>{timestamp} {HOSTNAME} VSCodeLog: {line.strip()}"
-    debug(msg=msg)
-    sock.sendto(msg.encode(), (SYSLOG_SERVER, SYSLOG_PORT))
+    if TO_REMOTE_SYSLOG:
+        pri = FACILITY * 8 + SYSLOG_PRI.get(level, 5)
+        timestamp = time.strftime("%b %d %H:%M:%S")
+        msg = f"<{pri}>{timestamp} {HOSTNAME} VSCodeLog: {line.strip()}"
+        debug(msg=msg)
+        sock.sendto(msg.encode(), (SYSLOG_SERVER, SYSLOG_PORT))
     print_to_console(level, line)
 
 def print_to_console(level, line):
